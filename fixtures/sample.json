@@ -1,0 +1,25 @@
+{
+  "objects": [
+    {
+      "name": "carbon",
+      "version": "v1",
+      "text": "abcdefghij"
+    }
+  ],
+  "requests": [
+    {
+      "query": "q1",
+      "object": "carbon",
+      "version": "v1",
+      "start": 1,
+      "length": 3
+    },
+    {
+      "query": "q2",
+      "object": "carbon",
+      "version": "v1",
+      "start": 3,
+      "length": 2
+    }
+  ]
+}
