@@ -21,3 +21,31 @@ where只接受结果严格为true的行。expression为null表示不限制。
 
 app.service.inspect → storage.freeze/digest → baseline.execute。sample.json描述的是现有可执行输入，服务输出附资料摘要。
 新增能力可以增加入口和计划结构，保留现有调用及输出语义；扩展格式应单独声明版本。
+
+## 扫描层共享调度器（app.scheduler，新增）
+
+ScanScheduler 在不改对象版本与字节范围接口的前提下，为多个查询合并区间并共享在途读取。
+
+* 身份隔离：只在同一不可变对象版本键 `(object, version)` 内合并；不同对象或版本永不共享。
+  物理读取仍调用 `reader.read(name, version, start, length)`，重试钉住原键，不跨版本拼接。
+* 两级结构：查询按 `page_size` 切成有界 chunk；同版本 chunk 按字节合并窗口
+  （`max_merge_gap`、`max_segment_size`）合并为 segment，一个 segment 对应一次物理读取。
+  合并在提交/完成/取消事件触发的泵中完成，模块内没有定时等待或 sleep。
+* 精确对应：每个查询取回的字节按其原始 `[start, start+length)` 半开区间从段缓冲精确切片，
+  切片为独立 bytes 复制；合并多读的空洞计入物理字节。
+* 配额：`max_inflight` 限在途物理段数；`buffer_budget_bytes` 限在途物理缓冲；
+  `max_query_bytes` 限单查询在途字节。段按公平序号 FIFO 扫描，不可接纳则跳过（队首避让），
+  小查询的段不超过页大小，具有可说明的进展保证。
+* 取消隔离：取消只摘除本查询在待派发段与在途段上的等待关系并释放其持有页；同段其他查询
+  不受影响。物理读不可中断，孤儿段读完即释放，不留下永久占用额度。
+* 记账（公开可查证）：
+  - 逐查询 `QueryStats`：`logical_bytes`（请求区间）、`physical_bytes`（挂载段整段字节，
+    含空洞）、`peak_inflight_bytes`、`peak_occupancy_bytes`（在途+持有）、`segments_joined`、
+    `read_attempts`。
+  - 全局 `SchedulerStats`：`physical_bytes`（唯一物理读取，含空洞与重试）、`hole_bytes`、
+    `logical_bytes`、`shared_saved_bytes = 各查询归因物理之和 − 全局物理`、
+    `buffered_bytes_now`（在途物理+未取走持有页）、`peak_buffered_bytes`、在途计数与峰值。
+  - 同一字节的每次真实复制都计入持有量，直到查询取走（result/iter_pages）、取消或失败；
+    不存在 memoryview 别名。
+* 失败传播：短读、底层异常传播给段上全部仍在等待的查询；sha256 在查询完整原始区间上
+  增量校验，失败只终结该查询。协调者线程的未预期异常会终结全部等待者而非静默挂起。
